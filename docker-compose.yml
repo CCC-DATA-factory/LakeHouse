@@ -1,0 +1,151 @@
+version: '3.8'
+
+services:
+  minio:
+    image: quay.io/minio/minio:latest
+    container_name: minio
+    hostname: minio
+    restart: always
+    ports:
+      - "9000:9000" 
+      - "9001:9001"  
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_SERVER_DRIVES: /data
+    volumes:
+      - ./persistent/data:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks:
+      - lakehouse_net
+
+
+
+  trino:
+    image: trinodb/trino:474
+    container_name: trino
+    ports:
+      - "8091:8090"
+    volumes:
+      - ./trino/etc:/etc/trino
+      - ./trino/data:/var/trino/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8090/v1/info"]
+      interval: 30s
+      timeout: 20s
+      retries: 5
+    depends_on:
+      - iceberg-rest
+      - minio
+    networks:
+      - lakehouse_net
+
+  iceberg-rest:
+    image: tabulario/iceberg-rest
+    container_name: iceberg-rest
+    hostname: iceberg
+    ports:
+      - "8181:8181"
+    environment:
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      CATALOG_CATALOG__IMPL: org.apache.iceberg.jdbc.JdbcCatalog
+      CATALOG_URI: jdbc:postgresql://postgres/demo_catalog
+      CATALOG_JDBC_USER: admin
+      CATALOG_JDBC_PASSWORD: password
+      CATALOG_WAREHOUSE: s3://warehouse
+      CATALOG_IO-IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_AWS_ACCESS_KEY_ID: minioadmin
+      CATALOG_AWS_SECRET_ACCESS_KEY: minioadmin
+      CATALOG_S3_ENDPOINT: http://minio:9000
+      CATALOG_S3_PATH-STYLE-ACCESS: "true"
+      CATALOG_AWS_REGION: us-east-1
+    depends_on:
+      - postgres
+      - minio
+    networks:
+      - lakehouse_net
+
+
+
+
+  postgres:
+    image: postgres:13
+    container_name: postgres
+    hostname: postgres
+    environment:
+      - POSTGRES_USER=admin
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=demo_catalog
+    networks:
+      - lakehouse_net
+
+    volumes:
+      - ./postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d demo_catalog"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+
+
+  apicurio-registry:
+    image: apicurio/apicurio-registry:3.0.0
+    container_name: apicurio-registry
+    hostname: apicurio
+    ports:
+      - "5544:8080"
+    environment:
+      APICURIO_STORAGE_KIND: 'sql'
+      APICURIO_STORAGE_SQL_KIND: 'postgresql'
+      APICURIO_DATASOURCE_URL: 'jdbc:postgresql://postgres/apicurio-registry'
+      APICURIO_DATASOURCE_USERNAME: admin
+      APICURIO_DATASOURCE_PASSWORD: password
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - lakehouse_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  
+  apicurio-ui:
+    image: apicurio/apicurio-registry-ui:3.0.0
+    container_name: apicurio-ui
+    hostname: apicurio-ui
+    ports:
+      - "8888:8080"  
+    environment:
+      REGISTRY_API_URL: "http://localhost:5544/apis/registry/v3"  
+      UI_FEATURES_READONLY: "false" 
+      AUTH_ENABLED: "false"  
+    networks:
+      - lakehouse_net  
+    depends_on:
+      apicurio-registry:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+
+
+networks:
+  lakehouse_net:
+    external: true
+
